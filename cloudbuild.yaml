@@ -35,9 +35,13 @@ steps:
       # --- free-tier-friendly sizing ---
       - --memory=512Mi          # en_core_web_sm fits; bump to 1Gi if you see OOM
       - --cpu=1
-      - --min-instances=0       # scale to zero => no charge while idle (key!)
-      - --max-instances=2       # cost guard against runaway autoscaling
-      - --concurrency=8         # inference is serialized by a lock; keep modest
+      - --min-instances=0       # scale to zero => no charge while idle (free tier)
+      - --max-instances=10      # absorb the frontend's parallel batch fan-out
+      # Inference is serialized by a lock, so an instance really handles 1 batch
+      # at a time. Setting concurrency=1 makes Cloud Run scale OUT across instances
+      # instead of packing requests onto a few and aborting the overflow.
+      - --concurrency=1
+      - --cpu-boost             # faster cold starts during burst scale-from-zero
       - --timeout=60
       - --allow-unauthenticated
       - --set-secrets=ANALYSIS_API_KEY=proseparse-analysis-key:latest
