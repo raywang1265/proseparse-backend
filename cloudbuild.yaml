@@ -1,0 +1,49 @@
+# Build the spaCy analysis image from the api/ context, push it to Artifact
+# Registry, and deploy to Cloud Run. Wired to a GitHub trigger (main branch).
+substitutions:
+  _REGION: us-central1
+  _SERVICE: proseparse-analysis
+  _REPO: proseparse
+
+steps:
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$COMMIT_SHA
+      - -f
+      - api/Dockerfile
+      - api
+
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$COMMIT_SHA
+
+  - id: deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ${_SERVICE}
+      - --image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$COMMIT_SHA
+      - --region=${_REGION}
+      - --platform=managed
+      # --- free-tier-friendly sizing ---
+      - --memory=512Mi          # en_core_web_sm fits; bump to 1Gi if you see OOM
+      - --cpu=1
+      - --min-instances=0       # scale to zero => no charge while idle (key!)
+      - --max-instances=2       # cost guard against runaway autoscaling
+      - --concurrency=8         # inference is serialized by a lock; keep modest
+      - --timeout=60
+      - --allow-unauthenticated
+      - --set-secrets=ANALYSIS_API_KEY=proseparse-analysis-key:latest
+
+images:
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$COMMIT_SHA
+
+options:
+  logging: CLOUD_LOGGING_ONLY

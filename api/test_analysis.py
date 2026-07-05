@@ -2,6 +2,12 @@
 
 from __future__ import annotations
 
+import os
+
+# Auth is mandatory; set the key before the app lifespan runs (on TestClient enter).
+os.environ.setdefault("ANALYSIS_API_KEY", "test-key")
+AUTH = {"Authorization": "Bearer test-key"}
+
 import spacy
 import pytest
 from fastapi.testclient import TestClient
@@ -157,7 +163,7 @@ def test_batch_endpoint_echoes_batch_index_and_blocks() -> None:
                 {"block": 5, "text": SAMPLE_PARAGRAPHS[1][1]},
             ],
         }
-        response = client.post("/analyze", json=payload)
+        response = client.post("/analyze", json=payload, headers=AUTH)
         assert response.status_code == 200
         data = response.json()
         assert data["batchIndex"] == 3
@@ -181,8 +187,28 @@ def test_oversized_paragraph_rejected() -> None:
                 {"block": 0, "text": "a " * (MAX_CHARS_PER_PARAGRAPH // 2 + 10)},
             ],
         }
-        response = client.post("/analyze", json=payload)
+        response = client.post("/analyze", json=payload, headers=AUTH)
         assert response.status_code == 413
+
+
+def test_analyze_requires_auth() -> None:
+    payload = {
+        "batchIndex": 0,
+        "paragraphs": [{"block": 0, "text": "The wind was carried inland."}],
+    }
+    with TestClient(app) as client:
+        # No Authorization header at all.
+        assert client.post("/analyze", json=payload).status_code == 401
+        # Wrong key.
+        wrong = {"Authorization": "Bearer nope"}
+        assert client.post("/analyze", json=payload, headers=wrong).status_code == 401
+        # Correct key succeeds.
+        assert client.post("/analyze", json=payload, headers=AUTH).status_code == 200
+
+
+def test_health_does_not_require_auth() -> None:
+    with TestClient(app) as client:
+        assert client.get("/health").status_code == 200
 
 
 def test_health() -> None:

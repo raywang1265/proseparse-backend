@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import secrets
 import threading
 from contextlib import asynccontextmanager
 from typing import Annotated
@@ -28,6 +29,13 @@ nlp_lock = threading.Lock()
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     global nlp
+    # Auth is mandatory: refuse to boot without a key so a misconfigured deploy
+    # can never serve traffic unauthenticated.
+    if not os.getenv("ANALYSIS_API_KEY"):
+        raise RuntimeError(
+            "ANALYSIS_API_KEY is required. Set it (e.g. via Cloud Run "
+            "--set-secrets ANALYSIS_API_KEY=...) before starting the service."
+        )
     logger.info("Loading spaCy model en_core_web_sm")
     nlp = spacy.load("en_core_web_sm", disable=["ner"])
     yield
@@ -79,12 +87,22 @@ def verify_api_key(
 ) -> None:
     expected = os.getenv("ANALYSIS_API_KEY")
     if not expected:
-        return
+        # Should be unreachable (lifespan fails fast), but guard defensively so
+        # we never fall open to unauthenticated access.
+        raise HTTPException(status_code=500, detail="Server authentication is not configured")
     if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+        raise HTTPException(
+            status_code=401,
+            detail="Missing or invalid Authorization header",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     token = authorization.removeprefix("Bearer ").strip()
-    if token != expected:
-        raise HTTPException(status_code=401, detail="Invalid API key")
+    if not secrets.compare_digest(token, expected):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid API key",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
 
 @app.get("/health")
