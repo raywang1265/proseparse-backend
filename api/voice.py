@@ -38,7 +38,9 @@ CONTRACTION_RE = re.compile(
 )
 PUNCT_MARKS = (".", ",", "!", "?", ";", ":", "-", "'", '"', "…", "—", "–")
 ADJACENT_NAME_WINDOW = 60
-PRONOUN_LOOKBACK_CHARS = 400
+# Pronoun antecedents: look back this many *narrative* sentences, zipping past
+# quote regions so a long speech does not exhaust the window.
+PRONOUN_LOOKBACK_SENTENCES = 4
 EMBEDDING_DIM = 384
 
 
@@ -288,20 +290,72 @@ def subject_of_verb(verb: Token) -> Token | None:
     return None
 
 
+def _span_fully_inside_regions(
+    start: int, end: int, regions: list[tuple[int, int]]
+) -> bool:
+    """True if [start, end) lies entirely inside some quote region."""
+    return any(o <= start and end <= c for o, c in regions)
+
+
+def _char_inside_regions(idx: int, regions: list[tuple[int, int]]) -> bool:
+    return any(o < idx < c for o, c in regions)
+
+
+def narrative_lookback_window_start(
+    doc: Doc,
+    pronoun: Token,
+    regions: list[tuple[int, int]],
+    *,
+    max_sentences: int = PRONOUN_LOOKBACK_SENTENCES,
+) -> int:
+    """Start char of the pronoun lookback window (2–4 narrative sentences).
+
+    Walks spaCy sentences backward from the pronoun. Sentences that lie fully
+    inside a quote region are skipped (do not consume the budget), so long
+    character speeches cannot push earlier narrative names out of range.
+    """
+    sents = list(doc.sents)
+    if not sents:
+        return 0
+
+    pronoun_sent_i = 0
+    for i, sent in enumerate(sents):
+        if sent.start_char <= pronoun.idx < sent.end_char:
+            pronoun_sent_i = i
+            break
+
+    counted = 0
+    window_start = sents[pronoun_sent_i].start_char
+    for i in range(pronoun_sent_i, -1, -1):
+        sent = sents[i]
+        if _span_fully_inside_regions(sent.start_char, sent.end_char, regions):
+            continue
+        counted += 1
+        window_start = sent.start_char
+        if counted >= max_sentences:
+            break
+    return window_start
+
+
 def resolve_pronoun_speaker(
     pronoun: Token,
     mentions: list[PersonMention],
     alias_map: dict[str, str],
     known_genders: dict[str, str],
+    doc: Doc,
+    regions: list[tuple[int, int]],
 ) -> str | None:
     gender = PRONOUN_GENDER.get(pronoun.text.lower())
     if gender is None:
         return None
+
+    window_start = narrative_lookback_window_start(doc, pronoun, regions)
     candidates: list[PersonMention] = []
     for m in mentions:
-        if m.end > pronoun.idx:
+        if m.end > pronoun.idx or m.start < window_start:
             continue
-        if pronoun.idx - m.end > PRONOUN_LOOKBACK_CHARS:
+        # Zip past names inside quoted speech (vocatives / quoted mentions).
+        if _char_inside_regions(m.start, regions):
             continue
         cluster = alias_map.get(short_name_key(m.canonical), m.canonical)
         g = known_genders.get(cluster) or m.gender
@@ -426,7 +480,7 @@ def attribute_quotes(doc: Doc) -> list[QuoteAssignment]:
                     qa.speaker = person
                 else:
                     resolved = resolve_pronoun_speaker(
-                        subj, mentions, alias_map, known_genders
+                        subj, mentions, alias_map, known_genders, doc, regions
                     )
                     if resolved is not None:
                         qa.speaker = resolved

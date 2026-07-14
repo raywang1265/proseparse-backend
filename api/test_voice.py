@@ -67,6 +67,28 @@ def test_attribute_explicit_named_speaker() -> None:
     assert any("You came back" in a.dialogue for a in assignments)
 
 
+def test_pronoun_lookback_zips_past_long_quote() -> None:
+    """Long quoted speech must not push the earlier name out of lookback range."""
+    long_speech = " ".join(
+        [
+            "I have walked these halls for years and counted every crack in the stone.",
+            "The wind never sleeps, and neither do the gulls that circle the tower.",
+            "You should have written. You should have warned me about the tide.",
+            "Instead you vanished like fog and left me holding a cold lamp.",
+            "The stairs remember your footsteps better than I remember your face.",
+            "Tell me now: why did you return on a night like this, after all this silence?",
+        ]
+    )
+    text = (
+        f'Mara waited by the door. "{long_speech}" she said, not turning around.'
+    )
+    doc = nlp_ner(text)
+    assignments = attribute_quotes(doc)
+    assert any(a.speaker == "Mara" for a in assignments)
+    # Sanity: the quoted span alone is far longer than the old 400-char window.
+    assert len(long_speech) > 400
+
+
 def test_attribute_split_sentence_tag() -> None:
     text = '"I never really left." Thomas muttered, and the wind howled.'
     doc = nlp_ner(text)
