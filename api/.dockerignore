@@ -5,4 +5,5 @@ venv
 .pytest_cache
 .mypy_cache
 test_analysis.py
+test_voice.py
 *.md
