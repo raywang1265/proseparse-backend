@@ -570,12 +570,14 @@ def compute_stylometry(dialogue_texts: list[str], nlp_doc_factory: Any) -> dict[
     pos_counts: dict[str, int] = defaultdict(int)
     unique_lemmas: set[str] = set()
     token_count = 0
+    word_count = 0
     for token in doc:
         if token.is_space:
             continue
         token_count += 1
         pos_counts[token.pos_] += 1
         if token.is_alpha:
+            word_count += 1
             unique_lemmas.add(token.lemma_.lower())
 
     sentence_count = sum(1 for _ in doc.sents) if joined.strip() else 0
@@ -583,6 +585,7 @@ def compute_stylometry(dialogue_texts: list[str], nlp_doc_factory: Any) -> dict[
     return {
         "sentenceCount": sentence_count,
         "tokenCount": token_count,
+        "wordCount": word_count,
         "charCount": len(joined),
         "contractionCount": contraction_count,
         "punctuation": punct_counts,
