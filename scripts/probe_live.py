@@ -46,12 +46,39 @@ SAMPLE_PARAGRAPHS = [
             "swallowed by the salt-thick air."
         ),
     },
+    # Tagless follow-up with only one known speaker → should land on UNKNOWN.
+    {
+        "block": 3,
+        "text": '"Still waiting for an answer."',
+    },
 ]
 
 
 def fail(msg: str) -> None:
     print(f"FAIL: {msg}", file=sys.stderr)
     sys.exit(1)
+
+
+def paragraph_by_block(block: int) -> str:
+    for p in SAMPLE_PARAGRAPHS:
+        if p["block"] == block:
+            return p["text"]
+    return ""
+
+
+def summarize_spans(spans: list[dict]) -> list[dict]:
+    """Compact span summary with a UTF-16 slice preview (BMP-safe for samples)."""
+    out: list[dict] = []
+    for sp in spans:
+        block = sp.get("block")
+        span = sp.get("span") or []
+        preview = None
+        if isinstance(block, int) and len(span) == 2:
+            text = paragraph_by_block(block)
+            start, end = span
+            preview = text[start:end]
+        out.append({"block": block, "span": span, "preview": preview})
+    return out
 
 
 def main() -> None:
@@ -114,6 +141,7 @@ def main() -> None:
         if r.status_code != 200:
             fail(f"/voice error: {r.text}")
         voice = r.json()
+        characters = voice.get("characters", [])
         summary = {
             "batchIndex": voice.get("batchIndex"),
             "characters": [
@@ -123,11 +151,23 @@ def main() -> None:
                     "stylometry": ch.get("stylometry"),
                     "uniqueLemmaCount": len(ch.get("uniqueLemmas", [])),
                     "sampleLemmas": ch.get("uniqueLemmas", [])[:8],
+                    "spanCount": len(ch.get("spans") or []),
+                    "spans": summarize_spans(ch.get("spans") or []),
                 }
-                for ch in voice.get("characters", [])
+                for ch in characters
             ],
         }
         print(json.dumps(summary, indent=2))
+
+        # Soft checks so an old revision without spans is obvious.
+        if characters and any("spans" not in ch for ch in characters):
+            fail(
+                "/voice characters missing `spans` — deploy the revision "
+                "that returns dialogue spans"
+            )
+        named = [c for c in characters if c.get("name") != "UNKNOWN"]
+        if named and not any(c.get("spans") for c in named):
+            fail("/voice returned no dialogue spans for named speakers")
 
     print("\nOK: health, /analyze, and /voice all succeeded.")
 

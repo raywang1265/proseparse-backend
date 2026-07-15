@@ -190,6 +190,38 @@ def test_voice_endpoint_returns_single_payload() -> None:
             assert len(ch["vector"]) == EMBEDDING_DIM
             assert isinstance(ch["stylometry"]["sentenceCount"], int)
             assert isinstance(ch["uniqueLemmas"], list)
+            assert "spans" in ch
+            assert isinstance(ch["spans"], list)
+
+        # Dialogue spans land on the correct paragraph blocks and slice quoted text.
+        by_name = {c["name"]: c for c in data["characters"]}
+        mara_spans = by_name["Mara"]["spans"]
+        thomas_spans = by_name["Thomas"]["spans"]
+        assert mara_spans and mara_spans[0]["block"] == 0
+        assert thomas_spans and thomas_spans[0]["block"] == 1
+        p0 = payload["paragraphs"][0]["text"]
+        s, e = mara_spans[0]["span"]
+        assert "You came back" in p0[s:e]
+
+
+def test_unknown_speaker_has_spans_when_unattributed() -> None:
+    payload = {
+        "batchIndex": 0,
+        "paragraphs": [
+            {"block": 5, "text": '"Only me here," Mara said.'},
+            {"block": 6, "text": '"Still talking to the void."'},
+        ],
+    }
+    with TestClient(app) as client:
+        data = client.post("/voice", json=payload, headers=AUTH).json()
+    by_name = {c["name"]: c for c in data["characters"]}
+    assert "UNKNOWN" in by_name
+    unknown_spans = by_name["UNKNOWN"]["spans"]
+    assert unknown_spans
+    assert all(sp["block"] == 6 for sp in unknown_spans)
+    p6 = payload["paragraphs"][1]["text"]
+    s, e = unknown_spans[0]["span"]
+    assert "Still talking" in p6[s:e]
 
 
 def test_voice_requires_auth() -> None:

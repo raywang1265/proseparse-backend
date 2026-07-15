@@ -10,7 +10,7 @@ from typing import Any, Protocol
 from gender_guesser.detector import Detector
 from spacy.tokens import Doc, Token
 
-from analysis import TAG_WINDOW_CHARS, detect_tags, find_quote_regions
+from analysis import TAG_WINDOW_CHARS, detect_tags, find_quote_regions, to_utf16_span
 
 UNKNOWN = "UNKNOWN"
 PRONOUN_GENDER = {
@@ -602,6 +602,76 @@ def cluster_dialogue(assignments: list[QuoteAssignment]) -> dict[str, list[str]]
     return dict(clusters)
 
 
+def build_paragraph_slices(
+    paragraphs: list[tuple[int, str]],
+) -> tuple[str, list[tuple[int, int, int, str]]]:
+    """Join paragraphs with ``\\n\\n`` and return (joined_text, slices).
+
+    Each slice is ``(block, start, end, text)`` in joined-text code-point offsets
+    (half-open ``[start, end)`` covering that paragraph's text only).
+    """
+    parts: list[str] = []
+    slices: list[tuple[int, int, int, str]] = []
+    pos = 0
+    for i, (block, text) in enumerate(paragraphs):
+        start = pos
+        end = pos + len(text)
+        slices.append((block, start, end, text))
+        parts.append(text)
+        pos = end
+        if i < len(paragraphs) - 1:
+            pos += 2  # "\n\n"
+    return "\n\n".join(parts), slices
+
+
+def _quote_abs_end(close_idx: int, doc_len: int) -> int:
+    """Half-open end covering the closing quote mark when present."""
+    return close_idx if close_idx >= doc_len else close_idx + 1
+
+
+def map_assignments_to_paragraph_spans(
+    assignments: list[QuoteAssignment],
+    slices: list[tuple[int, int, int, str]],
+    doc_len: int,
+) -> dict[str, list[dict[str, Any]]]:
+    """Map attributed quotes to per-speaker ``{block, span}`` UTF-16 spans.
+
+    ``span`` is a half-open UTF-16 ``[start, end]`` relative to that paragraph's
+    text (same convention as ``/analyze``), covering the quote including marks.
+    Quotes that cross a paragraph boundary are clipped to the paragraph that
+    contains the opening mark.
+    """
+    by_speaker: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    if not slices:
+        return {}
+
+    for qa in assignments:
+        speaker = qa.speaker or UNKNOWN
+        abs_start = qa.open_idx
+        abs_end = _quote_abs_end(qa.close_idx, doc_len)
+
+        owner: tuple[int, int, int, str] | None = None
+        for block, start, end, text in slices:
+            if start <= abs_start < end:
+                owner = (block, start, end, text)
+                break
+        if owner is None:
+            continue
+
+        block, para_start, para_end, para_text = owner
+        local_start = max(0, abs_start - para_start)
+        local_end = min(para_end, abs_end) - para_start
+        if local_start >= local_end:
+            continue
+        by_speaker[speaker].append(
+            {
+                "block": block,
+                "span": to_utf16_span(para_text, local_start, local_end),
+            }
+        )
+    return dict(by_speaker)
+
+
 def embed_character_texts(embedder: Embedder, texts: list[str]) -> list[list[float]]:
     if not texts:
         return []
@@ -615,10 +685,22 @@ def analyze_voice_chapter(
     embedder: Embedder,
     *,
     stylometry_nlp: Any,
+    paragraphs: list[tuple[int, str]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Attribute quotes, then emit per-character vectors + raw stylometry tallies."""
+    """Attribute quotes, then emit per-character vectors, tallies, and dialogue spans.
+
+    ``paragraphs`` is ``[(block, text), ...]`` in the same order used to build
+    ``doc``. When omitted, ``spans`` lists are empty.
+    """
     assignments = attribute_quotes(doc)
     clusters = cluster_dialogue(assignments)
+
+    span_map: dict[str, list[dict[str, Any]]] = {}
+    if paragraphs is not None:
+        _, slices = build_paragraph_slices(paragraphs)
+        span_map = map_assignments_to_paragraph_spans(
+            assignments, slices, len(doc.text)
+        )
 
     names = sorted(clusters.keys(), key=lambda n: (n == UNKNOWN, n.lower()))
     dialogues = [" ".join(clusters[n]) for n in names]
@@ -634,6 +716,7 @@ def analyze_voice_chapter(
                 "vector": vectors[i] if i < len(vectors) else [0.0] * EMBEDDING_DIM,
                 "stylometry": sty,
                 "uniqueLemmas": unique_lemmas,
+                "spans": span_map.get(name, []),
             }
         )
     return results
