@@ -7,13 +7,14 @@ import os
 import secrets
 import threading
 from contextlib import asynccontextmanager
-from typing import Annotated
+from typing import Annotated, Any
 
 import spacy
 from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
 from analysis import analyze_paragraph
+from voice import EMBEDDING_DIM, analyze_voice_chapter
 
 logger = logging.getLogger("proseparse.analysis")
 
@@ -21,9 +22,18 @@ logger = logging.getLogger("proseparse.analysis")
 # spaCy's parser memory scales with doc length; reject oversized paragraphs with a
 # clean 413 rather than letting spaCy raise or the container OOM.
 MAX_CHARS_PER_PARAGRAPH = 100_000
+MAX_PARAGRAPHS_PER_VOICE = 200
+MINILM_MODEL = os.getenv("MINILM_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
 
 nlp: spacy.Language | None = None
 nlp_lock = threading.Lock()
+
+# Voice pipeline models — lazy-loaded on first /voice request so /analyze keeps
+# its lighter RAM footprint until voice is actually used.
+nlp_ner: spacy.Language | None = None
+nlp_ner_lock = threading.Lock()
+embedder: Any | None = None
+embedder_lock = threading.Lock()
 
 
 @asynccontextmanager
@@ -82,6 +92,43 @@ class AnalyzeResponse(BaseModel):
     results: list[ParagraphResult]
 
 
+class VoiceRequest(BaseModel):
+    sessionId: str | None = None
+    chapterIndex: int = Field(ge=0)
+    paragraphs: list[ParagraphIn] = Field(
+        min_length=1, max_length=MAX_PARAGRAPHS_PER_VOICE
+    )
+
+    @field_validator("paragraphs")
+    @classmethod
+    def paragraphs_non_empty(cls, paragraphs: list[ParagraphIn]) -> list[ParagraphIn]:
+        for p in paragraphs:
+            if not p.text.strip():
+                raise ValueError("paragraph text must not be blank")
+        return paragraphs
+
+
+class StylometryTallies(BaseModel):
+    sentenceCount: int = Field(ge=0)
+    tokenCount: int = Field(ge=0)
+    charCount: int = Field(ge=0)
+    contractionCount: int = Field(ge=0)
+    punctuation: dict[str, int]
+    posCounts: dict[str, int]
+
+
+class CharacterVoice(BaseModel):
+    name: str
+    vector: list[float]
+    stylometry: StylometryTallies
+    uniqueLemmas: list[str]
+
+
+class VoiceResponse(BaseModel):
+    chapterIndex: int
+    characters: list[CharacterVoice]
+
+
 def verify_api_key(
     authorization: Annotated[str | None, Header()] = None,
 ) -> None:
@@ -103,6 +150,33 @@ def verify_api_key(
             detail="Invalid API key",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+
+def ensure_voice_models() -> tuple[spacy.Language, Any]:
+    """Lazy-load NER spaCy + MiniLM on first /voice call."""
+    global nlp_ner, embedder
+
+    if nlp_ner is None:
+        with nlp_ner_lock:
+            if nlp_ner is None:
+                logger.info("Loading spaCy model en_core_web_sm (with NER) for /voice")
+                nlp_ner = spacy.load("en_core_web_sm")
+
+    if embedder is None:
+        with embedder_lock:
+            if embedder is None:
+                logger.info("Loading SentenceTransformer %s", MINILM_MODEL)
+                from sentence_transformers import SentenceTransformer
+
+                embedder = SentenceTransformer(MINILM_MODEL)
+
+    assert nlp_ner is not None and embedder is not None
+    return nlp_ner, embedder
+
+
+def concatenate_paragraphs(paragraphs: list[ParagraphIn]) -> str:
+    """Join chapter paragraphs in order with double newlines for attribution span."""
+    return "\n\n".join(p.text for p in paragraphs)
 
 
 @app.get("/health")
@@ -156,3 +230,50 @@ def analyze_batch(
         )
 
     return AnalyzeResponse(batchIndex=body.batchIndex, results=results)
+
+
+@app.post("/voice", response_model=VoiceResponse)
+def voice_chapter(
+    body: VoiceRequest,
+    _: Annotated[None, Depends(verify_api_key)] = None,
+) -> VoiceResponse:
+    for p in body.paragraphs:
+        if len(p.text) > MAX_CHARS_PER_PARAGRAPH:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"Paragraph block {p.block} exceeds "
+                    f"{MAX_CHARS_PER_PARAGRAPH} characters"
+                ),
+            )
+
+    if body.sessionId:
+        logger.info(
+            "voice chapter=%s session=%s paragraphs=%s",
+            body.chapterIndex,
+            body.sessionId,
+            len(body.paragraphs),
+        )
+
+    ner, model = ensure_voice_models()
+    chapter_text = concatenate_paragraphs(body.paragraphs)
+
+    with nlp_ner_lock:
+        doc = ner(chapter_text)
+
+    with embedder_lock:
+        characters = analyze_voice_chapter(doc, model, stylometry_nlp=ner)
+
+    for ch in characters:
+        if len(ch["vector"]) != EMBEDDING_DIM:
+            logger.warning(
+                "unexpected embedding dim %s for %s (expected %s)",
+                len(ch["vector"]),
+                ch["name"],
+                EMBEDDING_DIM,
+            )
+
+    return VoiceResponse(
+        chapterIndex=body.chapterIndex,
+        characters=[CharacterVoice(**ch) for ch in characters],
+    )

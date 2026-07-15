@@ -7,3 +7,4 @@ venv/
 **/*.pyc
 **/.pytest_cache
 api/test_analysis.py
+api/test_voice.py
