@@ -3,8 +3,11 @@
 .gitignore
 venv/
 .venv/
+.env
+.env.*
 **/__pycache__
 **/*.pyc
 **/.pytest_cache
 api/test_analysis.py
 api/test_voice.py
+scripts/

@@ -161,7 +161,7 @@ def test_analyze_voice_chapter_vectors_are_384() -> None:
 
 def test_voice_endpoint_returns_single_payload() -> None:
     payload = {
-        "chapterIndex": 2,
+        "batchIndex": 2,
         "paragraphs": [
             {
                 "block": 0,
@@ -177,7 +177,7 @@ def test_voice_endpoint_returns_single_payload() -> None:
         response = client.post("/voice", json=payload, headers=AUTH)
         assert response.status_code == 200
         data = response.json()
-        assert data["chapterIndex"] == 2
+        assert data["batchIndex"] == 2
         assert "characters" in data
         assert isinstance(data["characters"], list)
         names = {c["name"] for c in data["characters"]}
@@ -191,7 +191,7 @@ def test_voice_endpoint_returns_single_payload() -> None:
 
 def test_voice_requires_auth() -> None:
     payload = {
-        "chapterIndex": 0,
+        "batchIndex": 0,
         "paragraphs": [{"block": 0, "text": '"Hi," Mara said.'}],
     }
     with TestClient(app) as client:
@@ -205,7 +205,7 @@ def test_voice_oversized_paragraph_rejected() -> None:
     from main import MAX_CHARS_PER_PARAGRAPH
 
     payload = {
-        "chapterIndex": 0,
+        "batchIndex": 0,
         "paragraphs": [
             {"block": 0, "text": "a " * (MAX_CHARS_PER_PARAGRAPH // 2 + 10)},
         ],

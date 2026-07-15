@@ -94,7 +94,7 @@ class AnalyzeResponse(BaseModel):
 
 class VoiceRequest(BaseModel):
     sessionId: str | None = None
-    chapterIndex: int = Field(ge=0)
+    batchIndex: int = Field(ge=0)
     paragraphs: list[ParagraphIn] = Field(
         min_length=1, max_length=MAX_PARAGRAPHS_PER_VOICE
     )
@@ -125,7 +125,7 @@ class CharacterVoice(BaseModel):
 
 
 class VoiceResponse(BaseModel):
-    chapterIndex: int
+    batchIndex: int
     characters: list[CharacterVoice]
 
 
@@ -175,7 +175,7 @@ def ensure_voice_models() -> tuple[spacy.Language, Any]:
 
 
 def concatenate_paragraphs(paragraphs: list[ParagraphIn]) -> str:
-    """Join chapter paragraphs in order with double newlines for attribution span."""
+    """Join batch paragraphs in order with double newlines for attribution span."""
     return "\n\n".join(p.text for p in paragraphs)
 
 
@@ -233,7 +233,7 @@ def analyze_batch(
 
 
 @app.post("/voice", response_model=VoiceResponse)
-def voice_chapter(
+def voice_batch(
     body: VoiceRequest,
     _: Annotated[None, Depends(verify_api_key)] = None,
 ) -> VoiceResponse:
@@ -249,17 +249,17 @@ def voice_chapter(
 
     if body.sessionId:
         logger.info(
-            "voice chapter=%s session=%s paragraphs=%s",
-            body.chapterIndex,
+            "voice batch=%s session=%s paragraphs=%s",
+            body.batchIndex,
             body.sessionId,
             len(body.paragraphs),
         )
 
     ner, model = ensure_voice_models()
-    chapter_text = concatenate_paragraphs(body.paragraphs)
+    batch_text = concatenate_paragraphs(body.paragraphs)
 
     with nlp_ner_lock:
-        doc = ner(chapter_text)
+        doc = ner(batch_text)
 
     with embedder_lock:
         characters = analyze_voice_chapter(doc, model, stylometry_nlp=ner)
@@ -274,6 +274,6 @@ def voice_chapter(
             )
 
     return VoiceResponse(
-        chapterIndex=body.chapterIndex,
+        batchIndex=body.batchIndex,
         characters=[CharacterVoice(**ch) for ch in characters],
     )
