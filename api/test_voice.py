@@ -136,9 +136,12 @@ def test_stylometry_raw_integer_tallies() -> None:
     sty = compute_stylometry(["I can't believe it!", "Really?"], nlp_ner)
     assert isinstance(sty["sentenceCount"], int)
     assert isinstance(sty["tokenCount"], int)
+    assert isinstance(sty["wordCount"], int)
     assert isinstance(sty["charCount"], int)
     assert isinstance(sty["contractionCount"], int)
     assert sty["contractionCount"] >= 1
+    assert sty["wordCount"] >= 1
+    assert sty["wordCount"] <= sty["tokenCount"]
     assert isinstance(sty["punctuation"], dict)
     assert isinstance(sty["posCounts"], dict)
     assert isinstance(sty["uniqueLemmas"], list)

@@ -111,6 +111,7 @@ class VoiceRequest(BaseModel):
 class StylometryTallies(BaseModel):
     sentenceCount: int = Field(ge=0)
     tokenCount: int = Field(ge=0)
+    wordCount: int = Field(ge=0)
     charCount: int = Field(ge=0)
     contractionCount: int = Field(ge=0)
     punctuation: dict[str, int]
