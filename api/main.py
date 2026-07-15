@@ -118,11 +118,17 @@ class StylometryTallies(BaseModel):
     posCounts: dict[str, int]
 
 
+class DialogueSpan(BaseModel):
+    block: int = Field(ge=0)
+    span: list[int]  # UTF-16 half-open [start, end] within that paragraph
+
+
 class CharacterVoice(BaseModel):
     name: str
     vector: list[float]
     stylometry: StylometryTallies
     uniqueLemmas: list[str]
+    spans: list[DialogueSpan] = Field(default_factory=list)
 
 
 class VoiceResponse(BaseModel):
@@ -257,13 +263,19 @@ def voice_batch(
         )
 
     ner, model = ensure_voice_models()
+    para_tuples = [(p.block, p.text) for p in body.paragraphs]
     batch_text = concatenate_paragraphs(body.paragraphs)
 
     with nlp_ner_lock:
         doc = ner(batch_text)
 
     with embedder_lock:
-        characters = analyze_voice_chapter(doc, model, stylometry_nlp=ner)
+        characters = analyze_voice_chapter(
+            doc,
+            model,
+            stylometry_nlp=ner,
+            paragraphs=para_tuples,
+        )
 
     for ch in characters:
         if len(ch["vector"]) != EMBEDDING_DIM:
