@@ -106,7 +106,7 @@ def main() -> None:
         # --- voice (may cold-start MiniLM; allow longer timeout) ---
         voice_body = {
             "sessionId": "probe-live",
-            "chapterIndex": 0,
+            "batchIndex": 0,
             "paragraphs": SAMPLE_PARAGRAPHS,
         }
         r = client.post("/voice", json=voice_body, headers=headers)
@@ -115,7 +115,7 @@ def main() -> None:
             fail(f"/voice error: {r.text}")
         voice = r.json()
         summary = {
-            "chapterIndex": voice.get("chapterIndex"),
+            "batchIndex": voice.get("batchIndex"),
             "characters": [
                 {
                     "name": ch["name"],
