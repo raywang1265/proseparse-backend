@@ -277,16 +277,49 @@ def find_tag_verb_for_quote(
     return bind_tags_to_quotes(doc, all_quotes, tag_spans).get(idx)
 
 
-def subject_of_verb(verb: Token) -> Token | None:
-    for child in verb.children:
-        if child.dep_ in {"nsubj", "nsubjpass"}:
-            return child
-    # Sometimes the subject is on an auxiliary head.
+def subject_of_verb(
+    verb: Token,
+    *,
+    quote: tuple[int, int] | None = None,
+) -> Token | None:
+    """Return the speech-verb subject, preferring tokens *outside* the quote.
+
+    Inverted dialogue like ``\"Hello!\" said Isabel`` often gets the in-quote
+    content marked as ``nsubj`` of ``said`` as well as the real speaker. Taking
+    the first ``nsubj`` then promotes capitalized dialogue (e.g. a fantasy noun)
+    into a fake character name.
+    """
+    open_idx, close_idx = quote if quote is not None else (None, None)
+
+    def outside_quote(tok: Token) -> bool:
+        if open_idx is None or close_idx is None:
+            return True
+        return not (open_idx < tok.idx < close_idx)
+
+    def pick(candidates: list[Token]) -> Token | None:
+        if not candidates:
+            return None
+        # Prefer the subject closest to the verb (usually the post-quote name).
+        return min(candidates, key=lambda t: abs(t.idx - verb.idx))
+
+    outside = [
+        c
+        for c in verb.children
+        if c.dep_ in {"nsubj", "nsubjpass"} and outside_quote(c)
+    ]
+    chosen = pick(outside)
+    if chosen is not None:
+        return chosen
+
+    # No outside subject — do NOT fall back to in-quote nsubj (that is dialogue).
     head = verb.head
     if head is not verb and head.pos_ in {"VERB", "AUX"}:
-        for child in head.children:
-            if child.dep_ in {"nsubj", "nsubjpass"}:
-                return child
+        outside_head = [
+            c
+            for c in head.children
+            if c.dep_ in {"nsubj", "nsubjpass"} and outside_quote(c)
+        ]
+        return pick(outside_head)
     return None
 
 
@@ -473,8 +506,9 @@ def attribute_quotes(doc: Doc) -> list[QuoteAssignment]:
 
         # Layer 1–2: explicit tag verb subject (named or pronoun).
         if verb is not None:
-            subj = subject_of_verb(verb)
-            if subj is not None:
+            subj = subject_of_verb(verb, quote=(open_idx, close_idx))
+            # Belt-and-suspenders: never treat in-quote tokens as the speaker.
+            if subj is not None and not (open_idx < subj.idx < close_idx):
                 person = resolve_person_token(subj, mentions, alias_map)
                 if person is not None:
                     qa.speaker = person

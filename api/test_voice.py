@@ -132,6 +132,20 @@ def test_vocative_inside_quote_is_not_speaker() -> None:
     assert "Mara" not in (assignments[0].speaker,)
 
 
+def test_capitalized_dialogue_noun_is_not_speaker() -> None:
+    """Inverted ``\"X!\" said Name`` must not treat in-quote PROPN as speaker."""
+    text = (
+        '"Kyriteshrooms!" said Isabel. "They only grow near the surface '
+        'because they need fresh, flowing air. We should be close."'
+    )
+    doc = nlp_ner(text)
+    assignments = attribute_quotes(doc)
+    speakers = {a.speaker for a in assignments}
+    assert "Kyriteshrooms" not in speakers
+    first = next(a for a in assignments if "Kyriteshrooms" in a.dialogue)
+    assert first.speaker == "Isabel"
+
+
 def test_stylometry_raw_integer_tallies() -> None:
     sty = compute_stylometry(["I can't believe it!", "Really?"], nlp_ner)
     assert isinstance(sty["sentenceCount"], int)
