@@ -17,7 +17,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Bake MiniLM into the image so Cloud Run cold starts stay offline / predictable.
 RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')"
 
-COPY analysis.py voice.py main.py ./
+COPY analysis.py voice.py sensory.py sensory_lexicon.py main.py ./
+COPY data/ ./data/
 
 ENV PORT=8080
 EXPOSE 8080
