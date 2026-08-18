@@ -6,4 +6,5 @@ venv
 .mypy_cache
 test_analysis.py
 test_voice.py
+test_sensory.py
 *.md

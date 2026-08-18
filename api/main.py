@@ -14,6 +14,8 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
 from analysis import analyze_paragraph
+from sensory import analyze_sensory_paragraph
+from sensory_lexicon import SENSES, get_lexicon
 from voice import EMBEDDING_DIM, analyze_voice_chapter
 
 logger = logging.getLogger("proseparse.analysis")
@@ -136,6 +138,53 @@ class VoiceResponse(BaseModel):
     characters: list[CharacterVoice]
 
 
+class SensoryRequest(BaseModel):
+    sessionId: str | None = None
+    batchIndex: int = Field(ge=0)
+    paragraphs: list[ParagraphIn] = Field(min_length=1, max_length=20)
+    includeDialogue: bool = True
+    debug: bool = False
+
+    @field_validator("paragraphs")
+    @classmethod
+    def paragraphs_non_empty(cls, paragraphs: list[ParagraphIn]) -> list[ParagraphIn]:
+        for p in paragraphs:
+            if not p.text.strip():
+                raise ValueError("paragraph text must not be blank")
+        return paragraphs
+
+
+class SensoryCounts(BaseModel):
+    sight: int = Field(ge=0)
+    sound: int = Field(ge=0)
+    touch: int = Field(ge=0)
+    smell: int = Field(ge=0)
+    taste: int = Field(ge=0)
+
+
+class SensoryDetail(BaseModel):
+    span: list[int]
+    sense: str
+    confidence: float
+    tier: int
+
+
+class SensoryParagraphResult(BaseModel):
+    block: int
+    sight: list[list[int]]
+    sound: list[list[int]]
+    touch: list[list[int]]
+    smell: list[list[int]]
+    taste: list[list[int]]
+    counts: SensoryCounts
+    details: list[SensoryDetail] | None = None
+
+
+class SensoryResponse(BaseModel):
+    batchIndex: int
+    results: list[SensoryParagraphResult]
+
+
 def verify_api_key(
     authorization: Annotated[str | None, Header()] = None,
 ) -> None:
@@ -159,16 +208,9 @@ def verify_api_key(
         )
 
 
-def ensure_voice_models() -> tuple[spacy.Language, Any]:
-    """Lazy-load NER spaCy + MiniLM on first /voice call."""
-    global nlp_ner, embedder
-
-    if nlp_ner is None:
-        with nlp_ner_lock:
-            if nlp_ner is None:
-                logger.info("Loading spaCy model en_core_web_sm (with NER) for /voice")
-                nlp_ner = spacy.load("en_core_web_sm")
-
+def ensure_embedder() -> Any:
+    """Lazy-load MiniLM once; shared by /voice and /sensory."""
+    global embedder
     if embedder is None:
         with embedder_lock:
             if embedder is None:
@@ -176,9 +218,23 @@ def ensure_voice_models() -> tuple[spacy.Language, Any]:
                 from sentence_transformers import SentenceTransformer
 
                 embedder = SentenceTransformer(MINILM_MODEL)
+    assert embedder is not None
+    return embedder
 
-    assert nlp_ner is not None and embedder is not None
-    return nlp_ner, embedder
+
+def ensure_voice_models() -> tuple[spacy.Language, Any]:
+    """Lazy-load NER spaCy + MiniLM on first /voice call."""
+    global nlp_ner
+
+    if nlp_ner is None:
+        with nlp_ner_lock:
+            if nlp_ner is None:
+                logger.info("Loading spaCy model en_core_web_sm (with NER) for /voice")
+                nlp_ner = spacy.load("en_core_web_sm")
+
+    model = ensure_embedder()
+    assert nlp_ner is not None
+    return nlp_ner, model
 
 
 def concatenate_paragraphs(paragraphs: list[ParagraphIn]) -> str:
@@ -290,3 +346,69 @@ def voice_batch(
         batchIndex=body.batchIndex,
         characters=[CharacterVoice(**ch) for ch in characters],
     )
+
+
+@app.post("/sensory", response_model=SensoryResponse)
+def sensory_batch(
+    body: SensoryRequest,
+    _: Annotated[None, Depends(verify_api_key)] = None,
+) -> SensoryResponse:
+    if nlp is None:
+        raise HTTPException(status_code=503, detail="Model not loaded")
+
+    for p in body.paragraphs:
+        if len(p.text) > MAX_CHARS_PER_PARAGRAPH:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"Paragraph block {p.block} exceeds "
+                    f"{MAX_CHARS_PER_PARAGRAPH} characters"
+                ),
+            )
+
+    if body.sessionId:
+        logger.info(
+            "sensory batch=%s session=%s paragraphs=%s",
+            body.batchIndex,
+            body.sessionId,
+            len(body.paragraphs),
+        )
+
+    lexicon = get_lexicon()
+    model = ensure_embedder()
+    texts = [p.text for p in body.paragraphs]
+    blocks = [p.block for p in body.paragraphs]
+
+    with nlp_lock:
+        docs = list(nlp.pipe(texts))
+
+    results: list[SensoryParagraphResult] = []
+    with embedder_lock:
+        for block, doc in zip(blocks, docs):
+            analyzed = analyze_sensory_paragraph(
+                doc,
+                lexicon,
+                model,
+                include_dialogue=body.includeDialogue,
+                debug=body.debug,
+            )
+            details = None
+            if body.debug and analyzed.get("details") is not None:
+                details = [SensoryDetail(**d) for d in analyzed["details"]]
+            results.append(
+                SensoryParagraphResult(
+                    block=block,
+                    sight=analyzed["sight"],
+                    sound=analyzed["sound"],
+                    touch=analyzed["touch"],
+                    smell=analyzed["smell"],
+                    taste=analyzed["taste"],
+                    counts=SensoryCounts(**analyzed["counts"]),
+                    details=details,
+                )
+            )
+
+    # Defensive: ensure every sense key is present (model schema already does).
+    assert all(hasattr(r, s) for r in results for s in SENSES)
+
+    return SensoryResponse(batchIndex=body.batchIndex, results=results)
