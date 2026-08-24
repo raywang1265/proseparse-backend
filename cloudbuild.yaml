@@ -33,17 +33,19 @@ steps:
       - --region=${_REGION}
       - --platform=managed
       # --- free-tier-friendly sizing ---
-      # 2Gi fits spaCy + CPU torch + all-MiniLM-L6-v2 in one image.
-      - --memory=2Gi
-      - --cpu=1
+      # 4Gi fits spaCy + MiniLM + DeBERTa-v3-base (~740 MB fp32) in one image.
+      # 2 vCPU shortens exposition batches (and MiniLM) without changing the
+      # memory-to-CPU constraint (1 vCPU already allows up to 4 GiB).
+      - --memory=4Gi
+      - --cpu=2
       - --min-instances=0       # scale to zero => no charge while idle (free tier)
-      - --max-instances=10      # absorb the frontend's parallel batch fan-out
+      - --max-instances=30      # absorb /exposition chapter fan-out plus /analyze
       # Inference is serialized by a lock, so an instance really handles 1 batch
       # at a time. Setting concurrency=1 makes Cloud Run scale OUT across instances
       # instead of packing requests onto a few and aborting the overflow.
       - --concurrency=1
       - --cpu-boost             # faster cold starts during burst scale-from-zero
-      - --timeout=60
+      - --timeout=120           # first /exposition request also loads 737 MB weights
       - --allow-unauthenticated
       - --set-secrets=ANALYSIS_API_KEY=proseparse-analysis-key:latest
 

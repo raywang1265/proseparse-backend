@@ -25,6 +25,7 @@ logger = logging.getLogger("proseparse.analysis")
 # clean 413 rather than letting spaCy raise or the container OOM.
 MAX_CHARS_PER_PARAGRAPH = 100_000
 MAX_PARAGRAPHS_PER_VOICE = 200
+MAX_PARAGRAPHS_PER_EXPOSITION = 20
 MINILM_MODEL = os.getenv("MINILM_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
 
 nlp: spacy.Language | None = None
@@ -36,6 +37,12 @@ nlp_ner: spacy.Language | None = None
 nlp_ner_lock = threading.Lock()
 embedder: Any | None = None
 embedder_lock = threading.Lock()
+
+# Exposition classifier — lazy-loaded on first /exposition request so /analyze
+# and /voice keep their lighter RAM footprint until exposition is used.
+exposition_tokenizer: Any | None = None
+exposition_model: Any | None = None
+exposition_lock = threading.Lock()
 
 
 @asynccontextmanager
@@ -185,6 +192,35 @@ class SensoryResponse(BaseModel):
     results: list[SensoryParagraphResult]
 
 
+class ExpositionRequest(BaseModel):
+    sessionId: str | None = None
+    batchIndex: int = Field(ge=0)
+    paragraphs: list[ParagraphIn] = Field(
+        min_length=1, max_length=MAX_PARAGRAPHS_PER_EXPOSITION
+    )
+
+    @field_validator("paragraphs")
+    @classmethod
+    def paragraphs_non_empty(cls, paragraphs: list[ParagraphIn]) -> list[ParagraphIn]:
+        for p in paragraphs:
+            if not p.text.strip():
+                raise ValueError("paragraph text must not be blank")
+        return paragraphs
+
+
+class ExpositionResult(BaseModel):
+    block: int
+    label: str
+    pDirect: float
+    directShare: int = Field(ge=0, le=100)
+    truncated: bool
+
+
+class ExpositionResponse(BaseModel):
+    batchIndex: int
+    results: list[ExpositionResult]
+
+
 def verify_api_key(
     authorization: Annotated[str | None, Header()] = None,
 ) -> None:
@@ -240,6 +276,25 @@ def ensure_voice_models() -> tuple[spacy.Language, Any]:
 def concatenate_paragraphs(paragraphs: list[ParagraphIn]) -> str:
     """Join batch paragraphs in order with double newlines for attribution span."""
     return "\n\n".join(p.text for p in paragraphs)
+
+
+def ensure_exposition_model() -> tuple[Any, Any]:
+    """Lazy-load DeBERTa classifier on first /exposition call."""
+    global exposition_tokenizer, exposition_model
+    if exposition_tokenizer is None or exposition_model is None:
+        with exposition_lock:
+            if exposition_tokenizer is None or exposition_model is None:
+                from exposition import MODEL_ID, MODEL_REVISION, load_classifier
+
+                logger.info(
+                    "Loading exposition classifier %s rev=%s",
+                    MODEL_ID,
+                    MODEL_REVISION,
+                )
+                exposition_tokenizer, exposition_model = load_classifier()
+    assert exposition_tokenizer is not None
+    assert exposition_model is not None
+    return exposition_tokenizer, exposition_model
 
 
 @app.get("/health")
@@ -412,3 +467,41 @@ def sensory_batch(
     assert all(hasattr(r, s) for r in results for s in SENSES)
 
     return SensoryResponse(batchIndex=body.batchIndex, results=results)
+
+
+@app.post("/exposition", response_model=ExpositionResponse)
+def exposition_batch(
+    body: ExpositionRequest,
+    _: Annotated[None, Depends(verify_api_key)] = None,
+) -> ExpositionResponse:
+    for p in body.paragraphs:
+        if len(p.text) > MAX_CHARS_PER_PARAGRAPH:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"Paragraph block {p.block} exceeds "
+                    f"{MAX_CHARS_PER_PARAGRAPH} characters"
+                ),
+            )
+
+    if body.sessionId:
+        logger.info(
+            "exposition batch=%s session=%s paragraphs=%s",
+            body.batchIndex,
+            body.sessionId,
+            len(body.paragraphs),
+        )
+
+    tokenizer, model = ensure_exposition_model()
+    texts = [p.text for p in body.paragraphs]
+    blocks = [p.block for p in body.paragraphs]
+
+    from exposition import classify_paragraphs
+
+    with exposition_lock:
+        scored = classify_paragraphs(tokenizer, model, texts)
+
+    results = [
+        ExpositionResult(block=block, **item) for block, item in zip(blocks, scored)
+    ]
+    return ExpositionResponse(batchIndex=body.batchIndex, results=results)

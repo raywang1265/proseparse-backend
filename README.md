@@ -1,12 +1,13 @@
 # ProseParse Backend
 
-Backend API for ProseParse — a FastAPI service that analyzes prose for passive/active voice, dialogue tags, per-character voice fingerprints, and five-sense sensory description spans. Deployed to Google Cloud Run via `cloudbuild.yaml`.
+Backend API for ProseParse — a FastAPI service that analyzes prose for passive/active voice, dialogue tags, per-character voice fingerprints, five-sense sensory description spans, and direct vs indirect exposition. Deployed to Google Cloud Run via `cloudbuild.yaml`.
 
 ## What it does
 
 - **`POST /analyze`** — Batch analysis of paragraphs: passive/active voice spans, dialogue tags, and voice counts (spaCy).
 - **`POST /voice`** — Character voice extraction: dialogue attribution, stylometry, unique lemmas, embedding vectors, and dialogue spans (spaCy NER + MiniLM).
 - **`POST /sensory`** — Five-sense trigger-word spans (`sight` / `sound` / `touch` / `smell` / `taste`) via Lancaster lexicon + MiniLM sentence embeddings. Same batching and UTF-16 span contract as `/analyze`.
+- **`POST /exposition`** — Paragraph-level direct vs indirect exposition scores from a fine-tuned DeBERTa-v3 classifier (`gu1npen/proseparse-exposition-finetune`). Same batching contract as `/analyze`. The Hub repo's `main` branch must contain the checkpoint (`config.json`, `model.safetensors`, `tokenizer.json`); until then set `EXPOSITION_REVISION` to a branch such as `experiment1-epoch3-deberta`.
 - **`GET /health`** — Liveness check (no auth).
 
 All analysis endpoints require a Bearer token (`ANALYSIS_API_KEY`).
@@ -45,7 +46,7 @@ cd api
 uvicorn main:app --reload --host 0.0.0.0 --port 8080
 ```
 
-The service listens on `http://localhost:8080`. `/analyze` loads spaCy at startup; `/voice` and `/sensory` lazy-load MiniLM on first use (shared embedder; the first request may take longer while the model downloads locally — it is baked into the Docker image).
+The service listens on `http://localhost:8080`. `/analyze` loads spaCy at startup; `/voice` and `/sensory` lazy-load MiniLM on first use (shared embedder); `/exposition` lazy-loads the DeBERTa classifier. The first request for a lazy model may take longer while weights download locally — both models are baked into the Docker image.
 
 ### Example requests
 
@@ -94,6 +95,37 @@ curl -X POST http://localhost:8080/sensory \
 
 Optional request flags: `includeDialogue` (default `true`), `debug` (adds per-span `details` with confidence/tier).
 
+```bash
+curl -X POST http://localhost:8080/exposition \
+  -H "Authorization: Bearer your-local-dev-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "batchIndex": 0,
+    "paragraphs": [
+      {"block": 0, "text": "Thomas was a kind man who had always been afraid of the dark."}
+    ]
+  }'
+```
+
+`/exposition` response shape (`pDirect` is softmax P(direct); `directShare` is `round(100 * pDirect)`):
+
+```json
+{
+  "batchIndex": 0,
+  "results": [
+    {
+      "block": 0,
+      "label": "direct",
+      "pDirect": 0.8123,
+      "directShare": 81,
+      "truncated": false
+    }
+  ]
+}
+```
+
+`truncated` is `true` when the paragraph exceeded the model's 384-token window.
+
 ### Tests
 
 ```bash
@@ -131,6 +163,7 @@ api/
   voice.py             # Character voice extraction
   sensory.py           # Five-sense trigger spans
   sensory_lexicon.py   # Lancaster lexicon loader
+  exposition.py        # Direct vs indirect exposition classifier
   data/                # sensory_lexicon.json.gz + attribution
   requirements.txt
   Dockerfile
@@ -144,6 +177,9 @@ cloudbuild.yaml            # Cloud Run deploy pipeline
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `ANALYSIS_API_KEY` | Yes | Bearer token for `/analyze`, `/voice`, and `/sensory` |
+| `ANALYSIS_API_KEY` | Yes | Bearer token for `/analyze`, `/voice`, `/sensory`, and `/exposition` |
 | `MINILM_MODEL` | No | Sentence-transformer model (default: `sentence-transformers/all-MiniLM-L6-v2`) |
+| `EXPOSITION_MODEL` | No | Hub repo id for the exposition classifier (default: `gu1npen/proseparse-exposition-finetune`) |
+| `EXPOSITION_REVISION` | No | Hub revision / branch (default: `main`) |
+| `TORCH_NUM_THREADS` | No | Intra-op thread count for the classifier (default: `2`) |
 | `PORT` | No | HTTP port (default: `8080`) |
