@@ -1,4 +1,4 @@
-"""Probe the live Cloud Run service for /health, /analyze, and /voice.
+"""Probe the live Cloud Run service for /health, /analyze, /voice, and /exposition.
 
 Usage (from repo root, with venv active):
 
@@ -88,7 +88,7 @@ def main() -> None:
         fail("ANALYSIS_API_KEY missing or still placeholder — set it in .env")
 
     headers = {"Authorization": f"Bearer {API_KEY}"}
-    timeout = httpx.Timeout(120.0, connect=30.0)
+    timeout = httpx.Timeout(180.0, connect=30.0)
 
     print(f"Probing {BASE_URL}\n")
 
@@ -169,7 +169,43 @@ def main() -> None:
         if named and not any(c.get("spans") for c in named):
             fail("/voice returned no dialogue spans for named speakers")
 
-    print("\nOK: health, /analyze, and /voice all succeeded.")
+        # --- exposition (may cold-start DeBERTa; allow longer timeout) ---
+        exposition_body = {
+            "sessionId": "probe-live",
+            "batchIndex": 0,
+            "paragraphs": SAMPLE_PARAGRAPHS,
+        }
+        r = client.post("/exposition", json=exposition_body, headers=headers)
+        print(f"\nPOST /exposition -> {r.status_code}")
+        if r.status_code != 200:
+            fail(f"/exposition error: {r.text}")
+        exposition = r.json()
+        print(
+            json.dumps(
+                {
+                    "batchIndex": exposition.get("batchIndex"),
+                    "resultCount": len(exposition.get("results", [])),
+                    "results": [
+                        {
+                            "block": item["block"],
+                            "label": item.get("label"),
+                            "pDirect": item.get("pDirect"),
+                            "directShare": item.get("directShare"),
+                            "truncated": item.get("truncated"),
+                        }
+                        for item in exposition.get("results", [])
+                    ],
+                },
+                indent=2,
+            )
+        )
+        if not exposition.get("results"):
+            fail("/exposition returned no results")
+        for item in exposition["results"]:
+            if item.get("label") not in {"direct", "indirect"}:
+                fail(f"/exposition unexpected label: {item.get('label')!r}")
+
+    print("\nOK: health, /analyze, /voice, and /exposition all succeeded.")
 
 
 if __name__ == "__main__":
